@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Search, LayoutGrid, List, DollarSign, Wallet, CheckCircle, AlertCircle, Users, Bus, MapPin, Ticket, BookOpen, Cloud, Save, Lock, LogIn, ShieldCheck, X, Eye, Filter, Ban, ArrowRightLeft, User, Bell, Check, Trash2, Phone, FileText, PhoneCall, Hash, Edit3, Plus } from 'lucide-react';
+import { Search, LayoutGrid, List, DollarSign, Wallet, CheckCircle, AlertCircle, Users, Bus, MapPin, Ticket, BookOpen, Cloud, Save, Lock, LogIn, ShieldCheck, X, Eye, Filter, Ban, ArrowRightLeft, User, Bell, Check, Trash2, Phone, FileText, PhoneCall, Hash, Edit3, Plus, AlertTriangle } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, addDoc, onSnapshot, getDoc } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, addDoc, onSnapshot, getDoc, writeBatch } from 'firebase/firestore';
 
 // --- Configuración de Firebase ---
-// NOTA PARA DEPLOY REAL: Reemplaza esto con tu propia configuración de Firebase Console
 const firebaseConfig = {
   apiKey: "AIzaSyA5PQR36r_fHNn6RRIKcVJm5Cu60lKYk8o",
   authDomain: "fil25-54c70.firebaseapp.com",
@@ -28,6 +27,16 @@ const COORDINATORS = {
   '223440784': { pass: 'samumv367', name: 'Samuel Mendez', busId: 1, color: 'bg-orange-600' }
 };
 
+// --- FUNCIÓN DE UTILIDAD PARA LIMPIAR DATOS (CRÍTICA PARA FIREBASE) ---
+// Elimina valores undefined que causan que Firebase se cuelgue
+const sanitize = (obj) => {
+  const newObj = {};
+  Object.keys(obj).forEach(key => {
+    if (obj[key] !== undefined) newObj[key] = obj[key];
+  });
+  return newObj;
+};
+
 const PaymentList = () => {
   // Estados de Admin y Modales
   const [isAdminMode, setIsAdminMode] = useState(false);
@@ -36,6 +45,7 @@ const PaymentList = () => {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showSwapModal, setShowSwapModal] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   
   // Nuevo Estado: Modal de Agregar Personas
   const [showAddModal, setShowAddModal] = useState(false);
@@ -241,21 +251,33 @@ const PaymentList = () => {
     const passengersCollectionPath = collection(db, 'artifacts', appId, 'public', 'data', 'fil_passengers_v15'); 
     const requestsCollectionPath = collection(db, 'artifacts', appId, 'public', 'data', 'fil_swap_requests_v15');
 
-    // Sync Usuarios
+    // Sync Usuarios con optimización de Batch Seed
     const unsubUsers = onSnapshot(passengersCollectionPath, async (snapshot) => {
       if (snapshot.empty || snapshot.docs.length < initialUsersSeed.length) {
         setLoading(true);
-        const batchPromises = initialUsersSeed.map(user => 
-          setDoc(doc(passengersCollectionPath, user.id.toString()), user)
-        );
-        await Promise.all(batchPromises);
-         
-        snapshot.docs.forEach(async (d) => {
-             const id = parseInt(d.id);
-             if (id > initialUsersSeed.length) { 
-                 await deleteDoc(doc(passengersCollectionPath, d.id));
-             }
+        
+        // --- OPTIMIZACIÓN: SEEDING POR LOTES (BATCHES) ---
+        // Evita sobrecargar la red y corrige el problema de "no aparecen pasajeros"
+        const batches = [];
+        let currentBatch = writeBatch(db);
+        let count = 0;
+        
+        initialUsersSeed.forEach(user => {
+            // Aseguramos que no haya undefined incluso en el seed inicial
+            currentBatch.set(doc(passengersCollectionPath, user.id.toString()), sanitize(user));
+            count++;
+            if (count === 400) { // Límite seguro por batch
+                batches.push(currentBatch.commit());
+                currentBatch = writeBatch(db);
+                count = 0;
+            }
         });
+        if (count > 0) batches.push(currentBatch.commit());
+        
+        await Promise.all(batches);
+         
+        // Limpieza de IDs antiguos si fuera necesario
+        // snapshot.docs.forEach(async (d) => { ... }); // Desactivado por seguridad
 
         const loadedUsers = initialUsersSeed; 
         loadedUsers.sort((a, b) => a.id - b.id);
@@ -362,7 +384,8 @@ const PaymentList = () => {
           if (updatedData.busId === 2) updatedData.color = "bg-blue-500";
           if (updatedData.busId === 3) updatedData.color = "bg-purple-500";
 
-          await updateDoc(docRef, updatedData);
+          // Usamos sanitize aquí también para evitar errores en edición
+          await updateDoc(docRef, sanitize(updatedData));
           setSelectedStudent(updatedData);
           setIsEditing(false);
       } catch (e) {
@@ -373,33 +396,128 @@ const PaymentList = () => {
       }
   };
 
-  // Función para agregar nueva persona
+  // Función para agregar nueva persona (CORREGIDA Y ROBUSTA)
   const handleSaveNewPerson = async () => {
     if (!isAdminMode) return;
     setSaving(true);
+    
+    // Validar datos básicos
+    if (!newPersonData.name.trim()) {
+        alert("El nombre es obligatorio");
+        setSaving(false);
+        return;
+    }
+
     try {
-        // Encontrar el ID más alto actual
-        const maxId = users.length > 0 ? Math.max(...users.map(u => u.id)) : 0;
-        const newId = maxId + 1;
+        const targetBusId = Number(newPersonData.busId) || 1;
+        const collectionPath = 'fil_passengers_v15';
+        
+        // 1. Encontrar el último ID del camión seleccionado para insertar después de él
+        const busUsers = users.filter(u => u.busId === targetBusId);
+        
+        // Calcular el nuevo ID
+        let newId;
+        // Si hay usuarios en ese camión, tomamos el mayor ID de ese camión
+        if (busUsers.length > 0) {
+             const maxIdInBus = Math.max(...busUsers.map(u => u.id));
+             newId = maxIdInBus + 1;
+        } else {
+             // Si el camión está vacío (raro), lo ponemos al final de toda la lista
+             const maxIdTotal = users.length > 0 ? Math.max(...users.map(u => u.id)) : 0;
+             newId = maxIdTotal + 1;
+        }
 
-        const dataToSave = {
-            ...newPersonData,
+        console.log(`Intentando agregar en ID ${newId} (Bus ${targetBusId})`);
+
+        // 2. Identificar usuarios que necesitan moverse (id >= newId)
+        // Ordenamos descendentemente para mover del último al primero
+        const usersToShift = users.filter(u => u.id >= newId).sort((a, b) => b.id - a.id);
+        
+        // 3. Ejecutar operaciones en Lote (Batch)
+        const batch = writeBatch(db);
+
+        // Paso A: Eliminar los documentos antiguos para evitar colisiones de ID
+        // Esto es crucial: primero borramos todos los que vamos a mover
+        usersToShift.forEach(user => {
+            const oldRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, user.id.toString());
+            batch.delete(oldRef);
+        });
+
+        // Paso B: Escribir los documentos en sus nuevas posiciones (ID + 1)
+        usersToShift.forEach(user => {
+            const newRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, (user.id + 1).toString());
+            // IMPORTANTE: Sanear datos antes de moverlos
+            const userData = sanitize({ ...user, id: user.id + 1 });
+            batch.set(newRef, userData);
+        });
+
+        // 4. Agregar al nuevo usuario en la posición liberada (newId)
+        const newPersonRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, newId.toString());
+        
+        const rawDataToSave = {
             id: newId,
-            busId: Number(newPersonData.busId),
-            payment: Number(newPersonData.payment),
-            role: 'Pasajero', // Por defecto
-            color: Number(newPersonData.busId) === 1 ? "bg-emerald-500" : Number(newPersonData.busId) === 2 ? "bg-blue-500" : "bg-purple-500"
+            name: newPersonData.name || "Sin Nombre",
+            busId: targetBusId,
+            payment: Number(newPersonData.payment) || 0,
+            phone: newPersonData.phone || "",
+            studentCode: newPersonData.studentCode || "",
+            ssn: newPersonData.ssn || "",
+            parent: newPersonData.parent || "",
+            parentPhone: newPersonData.parentPhone || "",
+            role: 'Pasajero', 
+            color: targetBusId === 1 ? "bg-emerald-500" : targetBusId === 2 ? "bg-blue-500" : "bg-purple-500"
         };
+        
+        // IMPORTANTE: Sanear datos nuevos
+        batch.set(newPersonRef, sanitize(rawDataToSave));
 
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'fil_passengers_v15', newId.toString());
-        await setDoc(docRef, dataToSave);
+        await batch.commit();
+        console.log("Batch completado exitosamente");
         
         setShowAddModal(false);
         setNewPersonData({ name: '', busId: 1, payment: 0, phone: '', studentCode: '', ssn: '', parent: '', parentPhone: '', role: 'Pasajero' });
         
     } catch (e) {
-        console.error("Error al agregar persona:", e);
-        alert("Error al agregar persona.");
+        console.error("Error crítico al agregar persona:", e);
+        alert(`Error al guardar: ${e.message}`);
+    } finally {
+        setSaving(false); // Asegura que siempre se desbloquee el botón
+    }
+  };
+
+  // Función para ELIMINAR persona y desplazar IDs hacia abajo
+  const handleDeletePerson = async () => {
+    if (!selectedStudent || !isAdminMode) return;
+    setSaving(true);
+    try {
+        const targetId = selectedStudent.id;
+        const usersToShift = users.filter(u => u.id > targetId);
+        const collectionPath = 'fil_passengers_v15';
+        const batch = writeBatch(db);
+
+        // 1. Eliminar el usuario objetivo
+        batch.delete(doc(db, 'artifacts', appId, 'public', 'data', collectionPath, targetId.toString()));
+
+        // 2. Mover todos los usuarios con ID superior una posición hacia abajo
+        // Primero borramos las posiciones originales para evitar conflictos
+        usersToShift.forEach(user => {
+             const oldRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, user.id.toString());
+             batch.delete(oldRef);
+        });
+
+        // Luego escribimos en las nuevas posiciones (ID - 1)
+        usersToShift.forEach(user => {
+            const newRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, (user.id - 1).toString());
+            // Sanear datos al mover
+            batch.set(newRef, sanitize({ ...user, id: user.id - 1 }));
+        });
+
+        await batch.commit();
+        setShowDeleteConfirm(false);
+        setSelectedStudent(null);
+    } catch (e) {
+        console.error("Error al eliminar persona:", e);
+        alert("Error al eliminar persona.");
     } finally {
         setTimeout(() => setSaving(false), 500);
     }
@@ -549,6 +667,32 @@ const PaymentList = () => {
                <button type="submit" className="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-2.5 rounded-lg">Entrar</button>
              </form>
           </div>
+        </div>
+      )}
+
+      {/* MODAL CONFIRMACION DE ELIMINACION */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-red-900/40 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-in zoom-in duration-200">
+            <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden border-2 border-red-500">
+                <div className="bg-red-50 p-6 flex flex-col items-center text-center">
+                    <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mb-4">
+                        <AlertTriangle className="w-8 h-8" />
+                    </div>
+                    <h3 className="text-lg font-bold text-red-700 mb-2">¿Eliminar Pasajero?</h3>
+                    <p className="text-sm text-slate-600 mb-4">
+                        Estás a punto de eliminar a <span className="font-bold text-slate-900">{selectedStudent?.name}</span> (Folio #{selectedStudent?.id}).
+                    </p>
+                    <div className="text-xs bg-red-100 text-red-800 p-3 rounded-lg border border-red-200 w-full text-left">
+                        <strong>Advertencia:</strong> Esta acción moverá todos los folios posteriores hacia abajo para rellenar el espacio.
+                    </div>
+                </div>
+                <div className="flex border-t border-slate-100">
+                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-3 text-slate-600 font-bold hover:bg-slate-50 transition-colors">Cancelar</button>
+                    <button onClick={handleDeletePerson} disabled={saving} className="flex-1 py-3 bg-red-600 text-white font-bold hover:bg-red-700 transition-colors">
+                        {saving ? 'Eliminando...' : 'Sí, Eliminar'}
+                    </button>
+                </div>
+            </div>
         </div>
       )}
 
@@ -771,30 +915,45 @@ const PaymentList = () => {
                 </div>
              </div>
              
-             {/* FOOTER CON BOTÓN DE GUARDAR */}
-             <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-end gap-3">
-                <button 
-                    onClick={() => setSelectedStudent(null)}
-                    className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors"
-                >
-                    Cancelar
-                </button>
-                <button 
-                    onClick={handleSaveChanges}
-                    disabled={!isEditing && !saving}
-                    className={`px-6 py-2 text-sm font-bold text-white rounded-lg shadow-md transition-all flex items-center gap-2 ${
-                        isEditing || saving 
-                        ? 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-0.5' 
-                        : 'bg-indigo-300 cursor-not-allowed'
-                    }`}
-                >
-                    {saving ? 'Guardando...' : (
-                        <>
-                            <Save className="w-4 h-4" />
-                            Guardar Cambios
-                        </>
-                    )}
-                </button>
+             {/* FOOTER CON BOTÓN DE GUARDAR Y ELIMINAR */}
+             <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-between items-center gap-3">
+                {isAdminMode ? (
+                    <button 
+                        onClick={() => setShowDeleteConfirm(true)}
+                        className="px-3 py-2 text-sm font-bold text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors flex items-center gap-1"
+                        title="Eliminar Pasajero"
+                    >
+                        <Trash2 className="w-4 h-4" />
+                        <span className="hidden sm:inline">Eliminar</span>
+                    </button>
+                ) : (
+                    <div></div> // Spacer
+                )}
+
+                <div className="flex gap-3">
+                    <button 
+                        onClick={() => setSelectedStudent(null)}
+                        className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors"
+                    >
+                        Cancelar
+                    </button>
+                    <button 
+                        onClick={handleSaveChanges}
+                        disabled={!isEditing && !saving}
+                        className={`px-6 py-2 text-sm font-bold text-white rounded-lg shadow-md transition-all flex items-center gap-2 ${
+                            isEditing || saving 
+                            ? 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-0.5' 
+                            : 'bg-indigo-300 cursor-not-allowed'
+                        }`}
+                    >
+                        {saving ? 'Guardando...' : (
+                            <>
+                                <Save className="w-4 h-4" />
+                                Guardar
+                            </>
+                        )}
+                    </button>
+                </div>
              </div>
           </div>
           </div>
