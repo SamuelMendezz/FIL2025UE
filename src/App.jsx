@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Search, LayoutGrid, List, DollarSign, Wallet, CheckCircle, AlertCircle, Users, Bus, MapPin, Ticket, BookOpen, Cloud, Save, Lock, LogIn, ShieldCheck, X, Eye, Filter, Ban, ArrowRightLeft, User, Bell, Check, Trash2, Phone, FileText, PhoneCall, Hash, Edit3, Plus } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, addDoc, onSnapshot, getDoc, writeBatch } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, addDoc, onSnapshot, getDoc } from 'firebase/firestore';
 
 // --- Configuración de Firebase ---
 // NOTA PARA DEPLOY REAL: Reemplaza esto con tu propia configuración de Firebase Console
@@ -373,71 +373,33 @@ const PaymentList = () => {
       }
   };
 
-  // Función para agregar nueva persona (Actualizada para desplazar IDs)
+  // Función para agregar nueva persona
   const handleSaveNewPerson = async () => {
     if (!isAdminMode) return;
     setSaving(true);
     try {
-        const targetBusId = Number(newPersonData.busId);
-        
-        // 1. Encontrar el último ID del camión seleccionado para insertar después de él
-        const busUsers = users.filter(u => u.busId === targetBusId);
-        // Si hay usuarios en ese camión, tomamos el mayor ID. Si no, buscamos el mayor global o empezamos en 1.
-        // Asumiendo que siempre hay coordinadores con IDs bajos, esto debería funcionar bien.
-        const maxIdInBus = busUsers.length > 0 ? Math.max(...busUsers.map(u => u.id)) : 0;
-        
-        // El nuevo ID será el siguiente al último de este camión.
-        // Si por alguna razón extraña maxIdInBus es 0 (no hay nadie), insertamos al final de la lista global.
-        let newId;
-        if (maxIdInBus === 0) {
-             const maxIdTotal = users.length > 0 ? Math.max(...users.map(u => u.id)) : 0;
-             newId = maxIdTotal + 1;
-        } else {
-             newId = maxIdInBus + 1;
-        }
+        // Encontrar el ID más alto actual
+        const maxId = users.length > 0 ? Math.max(...users.map(u => u.id)) : 0;
+        const newId = maxId + 1;
 
-        // 2. Identificar usuarios que necesitan moverse (id >= newId) para hacer hueco
-        const usersToShift = users.filter(u => u.id >= newId);
-        
-        // 3. Ejecutar operaciones en Lote (Batch) para atomicidad
-        const batch = writeBatch(db);
-        const collectionPath = 'fil_passengers_v15'; // Asegurarse de usar la misma colección v15
-
-        // Borrar todos los documentos antiguos que se van a mover para evitar duplicados/colisiones
-        // Es más seguro borrar y luego crear en la nueva posición dentro del mismo batch
-        usersToShift.forEach(user => {
-            const oldRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, user.id.toString());
-            batch.delete(oldRef);
-        });
-
-        // Crear los documentos en sus nuevas posiciones (ID + 1)
-        usersToShift.forEach(user => {
-            const newRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, (user.id + 1).toString());
-            batch.set(newRef, { ...user, id: user.id + 1 });
-        });
-
-        // 4. Agregar al nuevo usuario en la posición liberada (newId)
-        const newPersonRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, newId.toString());
-        
         const dataToSave = {
             ...newPersonData,
             id: newId,
-            busId: targetBusId,
+            busId: Number(newPersonData.busId),
             payment: Number(newPersonData.payment),
-            role: 'Pasajero', 
-            color: targetBusId === 1 ? "bg-emerald-500" : targetBusId === 2 ? "bg-blue-500" : "bg-purple-500"
+            role: 'Pasajero', // Por defecto
+            color: Number(newPersonData.busId) === 1 ? "bg-emerald-500" : Number(newPersonData.busId) === 2 ? "bg-blue-500" : "bg-purple-500"
         };
-        
-        batch.set(newPersonRef, dataToSave);
 
-        await batch.commit();
+        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'fil_passengers_v15', newId.toString());
+        await setDoc(docRef, dataToSave);
         
         setShowAddModal(false);
         setNewPersonData({ name: '', busId: 1, payment: 0, phone: '', studentCode: '', ssn: '', parent: '', parentPhone: '', role: 'Pasajero' });
         
     } catch (e) {
         console.error("Error al agregar persona:", e);
-        alert("Error al agregar persona y mover folios.");
+        alert("Error al agregar persona.");
     } finally {
         setTimeout(() => setSaving(false), 500);
     }
