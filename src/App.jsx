@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, LayoutGrid, List, DollarSign, Wallet, CheckCircle, AlertCircle, Users, Bus, MapPin, Ticket, BookOpen, Cloud, Save, Lock, LogIn, ShieldCheck, X, Eye, Filter, Ban, ArrowRightLeft, User, Bell, Check, Trash2, Phone, FileText, PhoneCall, Hash, Edit3, Plus, AlertTriangle } from 'lucide-react';
+import { Search, LayoutGrid, List, DollarSign, Wallet, CheckCircle, AlertCircle, Users, Bus, MapPin, Ticket, BookOpen, Cloud, Save, Lock, LogIn, ShieldCheck, X, Eye, Filter, Ban, ArrowRightLeft, User, Bell, Check, Trash2, Phone, FileText, PhoneCall, Hash, Edit3, Plus } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, updateDoc, deleteDoc, addDoc, onSnapshot, getDoc, writeBatch } from 'firebase/firestore';
@@ -36,7 +36,6 @@ const PaymentList = () => {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showSwapModal, setShowSwapModal] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   
   // Nuevo Estado: Modal de Agregar Personas
   const [showAddModal, setShowAddModal] = useState(false);
@@ -444,39 +443,6 @@ const PaymentList = () => {
     }
   };
 
-  // Función para ELIMINAR persona y desplazar IDs hacia abajo
-  const handleDeletePerson = async () => {
-    if (!selectedStudent || !isAdminMode) return;
-    setSaving(true);
-    try {
-        const targetId = selectedStudent.id;
-        const usersToShift = users.filter(u => u.id > targetId);
-        const collectionPath = 'fil_passengers_v15';
-        const batch = writeBatch(db);
-
-        // 1. Eliminar el usuario objetivo
-        batch.delete(doc(db, 'artifacts', appId, 'public', 'data', collectionPath, targetId.toString()));
-
-        // 2. Mover todos los usuarios con ID superior una posición hacia abajo
-        // (ID 46 se vuelve ID 45, etc.)
-        usersToShift.forEach(user => {
-            const oldRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, user.id.toString());
-            const newRef = doc(db, 'artifacts', appId, 'public', 'data', collectionPath, (user.id - 1).toString());
-            batch.delete(oldRef); // Borrar la posición vieja
-            batch.set(newRef, { ...user, id: user.id - 1 }); // Crear en la nueva posición
-        });
-
-        await batch.commit();
-        setShowDeleteConfirm(false);
-        setSelectedStudent(null);
-    } catch (e) {
-        console.error("Error al eliminar persona:", e);
-        alert("Error al eliminar persona.");
-    } finally {
-        setTimeout(() => setSaving(false), 500);
-    }
-  };
-
   // ... (Lógica de Permutas y Aprobaciones sin cambios) ...
   const getSwapCandidates = () => {
     const id1 = parseInt(swapId1, 10);
@@ -621,32 +587,6 @@ const PaymentList = () => {
                <button type="submit" className="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-2.5 rounded-lg">Entrar</button>
              </form>
           </div>
-        </div>
-      )}
-
-      {/* MODAL CONFIRMACION DE ELIMINACION */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 bg-red-900/40 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-in zoom-in duration-200">
-            <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full overflow-hidden border-2 border-red-500">
-                <div className="bg-red-50 p-6 flex flex-col items-center text-center">
-                    <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mb-4">
-                        <AlertTriangle className="w-8 h-8" />
-                    </div>
-                    <h3 className="text-lg font-bold text-red-700 mb-2">¿Eliminar Pasajero?</h3>
-                    <p className="text-sm text-slate-600 mb-4">
-                        Estás a punto de eliminar a <span className="font-bold text-slate-900">{selectedStudent?.name}</span> (Folio #{selectedStudent?.id}).
-                    </p>
-                    <div className="text-xs bg-red-100 text-red-800 p-3 rounded-lg border border-red-200 w-full text-left">
-                        <strong>Advertencia:</strong> Esta acción moverá todos los folios posteriores hacia abajo para rellenar el espacio.
-                    </div>
-                </div>
-                <div className="flex border-t border-slate-100">
-                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 py-3 text-slate-600 font-bold hover:bg-slate-50 transition-colors">Cancelar</button>
-                    <button onClick={handleDeletePerson} disabled={saving} className="flex-1 py-3 bg-red-600 text-white font-bold hover:bg-red-700 transition-colors">
-                        {saving ? 'Eliminando...' : 'Sí, Eliminar'}
-                    </button>
-                </div>
-            </div>
         </div>
       )}
 
@@ -869,45 +809,30 @@ const PaymentList = () => {
                 </div>
              </div>
              
-             {/* FOOTER CON BOTÓN DE GUARDAR Y ELIMINAR */}
-             <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-between items-center gap-3">
-                {isAdminMode ? (
-                    <button 
-                        onClick={() => setShowDeleteConfirm(true)}
-                        className="px-3 py-2 text-sm font-bold text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors flex items-center gap-1"
-                        title="Eliminar Pasajero"
-                    >
-                        <Trash2 className="w-4 h-4" />
-                        <span className="hidden sm:inline">Eliminar</span>
-                    </button>
-                ) : (
-                    <div></div> // Spacer
-                )}
-
-                <div className="flex gap-3">
-                    <button 
-                        onClick={() => setSelectedStudent(null)}
-                        className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors"
-                    >
-                        Cancelar
-                    </button>
-                    <button 
-                        onClick={handleSaveChanges}
-                        disabled={!isEditing && !saving}
-                        className={`px-6 py-2 text-sm font-bold text-white rounded-lg shadow-md transition-all flex items-center gap-2 ${
-                            isEditing || saving 
-                            ? 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-0.5' 
-                            : 'bg-indigo-300 cursor-not-allowed'
-                        }`}
-                    >
-                        {saving ? 'Guardando...' : (
-                            <>
-                                <Save className="w-4 h-4" />
-                                Guardar
-                            </>
-                        )}
-                    </button>
-                </div>
+             {/* FOOTER CON BOTÓN DE GUARDAR */}
+             <div className="bg-slate-50 p-4 border-t border-slate-200 flex justify-end gap-3">
+                <button 
+                    onClick={() => setSelectedStudent(null)}
+                    className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors"
+                >
+                    Cancelar
+                </button>
+                <button 
+                    onClick={handleSaveChanges}
+                    disabled={!isEditing && !saving}
+                    className={`px-6 py-2 text-sm font-bold text-white rounded-lg shadow-md transition-all flex items-center gap-2 ${
+                        isEditing || saving 
+                        ? 'bg-indigo-600 hover:bg-indigo-700 hover:-translate-y-0.5' 
+                        : 'bg-indigo-300 cursor-not-allowed'
+                    }`}
+                >
+                    {saving ? 'Guardando...' : (
+                        <>
+                            <Save className="w-4 h-4" />
+                            Guardar Cambios
+                        </>
+                    )}
+                </button>
              </div>
           </div>
           </div>
